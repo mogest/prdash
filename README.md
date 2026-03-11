@@ -4,6 +4,8 @@ A terminal dashboard for your GitHub pull requests. See your open PRs, what's wa
 
 ![Python 3.11+](https://img.shields.io/badge/python-3.11+-blue)
 
+![prdash screenshot](screenshot.png)
+
 ## Features
 
 - **Your PRs not in review** — open PRs that haven't been sent for review yet
