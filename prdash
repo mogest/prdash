@@ -164,11 +164,11 @@ def print_table(columns, rows, highlighted=None, file=None):
                 if key == "checks" and row.get("checks_color"):
                     val = row["checks_color"] + val + RESET
                 elif key == "pr" and row.get("url"):
-                    val = BLUE + link(row["url"], val) + RESET
-            elif key == "pr" and row.get("url"):
-                val = link(row["url"], val)
+                    val = BLUE + val + RESET
             parts.append(val)
         line = gap.join(parts)
+        if row.get("url"):
+            line = link(row["url"], line)
         if highlight:
             line = f"{HIGHLIGHT}{line}\033[K{RESET}"
         print(line, file=file)
