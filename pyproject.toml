@@ -1,0 +1,21 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "prdash"
+version = "0.1.0"
+description = "Terminal dashboard for GitHub pull requests"
+readme = "README.md"
+license = "MIT"
+requires-python = ">=3.11"
+authors = [
+    { name = "Mog Nesbitt" },
+]
+classifiers = [
+    "Environment :: Console",
+    "Topic :: Software Development",
+]
+
+[project.scripts]
+prdash = "prdash.cli:main"

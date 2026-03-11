@@ -1,5 +1,3 @@
-#!/usr/bin/env python3
-
 import argparse
 from datetime import datetime
 import io
@@ -9,12 +7,30 @@ import subprocess
 import sys
 import time
 import tomllib
-from concurrent.futures import ThreadPoolExecutor, Future
+from concurrent.futures import ThreadPoolExecutor
 
 CONFIG_PATH = os.path.join(
     os.environ.get("XDG_CONFIG_HOME", os.path.expanduser("~/.config")),
     "prdash.toml",
 )
+
+USER = None
+REPOS = None
+TEAMS = None
+
+GREEN = "\033[32m"
+RED = "\033[31m"
+YELLOW = "\033[33m"
+CYAN = "\033[36m"
+BLUE = "\033[38;5;75m"
+DARK_GREY = "\033[38;5;240m"
+MID_GREY = "\033[38;5;245m"
+LIGHT_GREY = "\033[37m"
+BOLD = "\033[1m"
+RESET = "\033[0m"
+
+HIGHLIGHT = "\033[48;5;23;37m"
+NONE_MSG = f"{MID_GREY}— none —{RESET}"
 
 
 def load_config():
@@ -48,26 +64,6 @@ def load_config():
 
     print(f"\nConfig saved to {CONFIG_PATH}\n")
     return {"user": user, "repos": repos, "teams": teams}
-
-
-config = load_config()
-REPOS = config["repos"]
-USER = config["user"]
-TEAMS = config.get("teams", [])
-
-GREEN = "\033[32m"
-RED = "\033[31m"
-YELLOW = "\033[33m"
-CYAN = "\033[36m"
-BLUE = "\033[38;5;75m"
-DARK_GREY = "\033[38;5;240m"
-MID_GREY = "\033[38;5;245m"
-LIGHT_GREY = "\033[37m"
-BOLD = "\033[1m"
-RESET = "\033[0m"
-
-HIGHLIGHT = "\033[48;5;23;37m"
-NONE_MSG = f"{MID_GREY}— none —{RESET}"
 
 
 def link(url, label):
@@ -319,6 +315,13 @@ def render(tables, out, highlighted=None):
 
 
 def main():
+    global USER, REPOS, TEAMS
+
+    config = load_config()
+    REPOS = config["repos"]
+    USER = config["user"]
+    TEAMS = config.get("teams", [])
+
     parser = argparse.ArgumentParser(description="Show PR status dashboard")
     parser.add_argument("-w", "--watch", type=int, metavar="SECONDS",
                         help="refresh every SECONDS seconds")
@@ -353,7 +356,3 @@ def main():
             render(tables, sys.stdout)
     except KeyboardInterrupt:
         print()
-
-
-if __name__ == "__main__":
-    main()
