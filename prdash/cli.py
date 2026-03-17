@@ -43,17 +43,74 @@ def load_config():
                 sys.exit(1)
         return config
 
-    print("First-time setup for prdash.\n")
-    user = input("GitHub user: ").strip()
-    repos_input = input("Repos as org/repo (comma-separated): ").strip()
-    teams_input = input("Teams (comma-separated, blank to skip): ").strip()
+    print(f"{BOLD}{CYAN}First-time setup for prdash{RESET}\n")
 
-    if not user or not repos_input:
-        print("error: user and repos are required", file=sys.stderr)
+    default_user = ""
+    try:
+        result = subprocess.run(
+            ["gh", "api", "/user", "--jq", ".login"],
+            capture_output=True, text=True,
+        )
+        if result.returncode == 0:
+            default_user = result.stdout.strip()
+    except FileNotFoundError:
+        pass
+
+    print(f"{BOLD}GitHub user{RESET}")
+    if default_user:
+        user = input(f"  username [{default_user}]: ").strip() or default_user
+    else:
+        user = input("  username: ").strip()
+    if not user:
+        print(f"{RED}error: user is required{RESET}", file=sys.stderr)
         sys.exit(1)
 
-    repos = [r.strip() for r in repos_input.split(",") if r.strip()]
-    teams = [t.strip() for t in teams_input.split(",") if t.strip()]
+    print(f"\n{BOLD}Repos to monitor{RESET}")
+    print(f"{MID_GREY}  Enter repos in org/repo format, one per line. Blank to finish.{RESET}")
+    repos = []
+    while True:
+        repo = input("  repo: ").strip()
+        if not repo:
+            if not repos:
+                print(f"  {YELLOW}at least one repo is required{RESET}")
+                continue
+            break
+        result = subprocess.run(
+            ["gh", "repo", "view", repo, "--json", "name"],
+            capture_output=True, text=True,
+        )
+        if result.returncode != 0:
+            print(f"  {RED}'{repo}' not found or not accessible, try again{RESET}")
+            continue
+        print(f"  {GREEN}added{RESET}")
+        repos.append(repo)
+
+    print(f"\n{BOLD}Teams{RESET}")
+    print(f"{MID_GREY}  PRs requesting review from your teams will show in your dashboard.{RESET}")
+    teams = []
+    repo_orgs = {r.split("/")[0] for r in repos}
+    try:
+        result = subprocess.run(
+            ["gh", "api", "/user/teams", "--jq", r'.[] | "\(.organization.login)\t\(.name)"'],
+            capture_output=True, text=True,
+        )
+        if result.returncode == 0 and result.stdout.strip():
+            detected = []
+            for line in result.stdout.strip().splitlines():
+                org, name = line.split("\t", 1)
+                if org in repo_orgs:
+                    detected.append(name)
+            if detected:
+                print(f"  detected: {CYAN}{', '.join(detected)}{RESET}")
+                keep = input("  use these teams? [Y/n]: ").strip().lower()
+                if keep != "n":
+                    teams = detected
+    except FileNotFoundError:
+        pass
+
+    if not teams:
+        teams_input = input("  teams (comma-separated, blank to skip): ").strip()
+        teams = [t.strip() for t in teams_input.split(",") if t.strip()]
 
     os.makedirs(os.path.dirname(CONFIG_PATH), exist_ok=True)
     with open(CONFIG_PATH, "w") as f:
@@ -62,7 +119,7 @@ def load_config():
         if teams:
             f.write("teams = [{}]\n".format(", ".join(f'"{t}"' for t in teams)))
 
-    print(f"\nConfig saved to {CONFIG_PATH}\n")
+    print(f"\n{GREEN}Config saved to {CONFIG_PATH}{RESET}\n")
     return {"user": user, "repos": repos, "teams": teams}
 
 
@@ -121,6 +178,7 @@ def check_status(rollup):
     if not rollup:
         return "—", None
 
+    total = len(rollup)
     passed = failed = 0
     for check in rollup:
         state = check.get("conclusion") or check.get("state") or "PENDING"
@@ -129,15 +187,14 @@ def check_status(rollup):
         elif state in ("FAILURE", "ERROR", "CANCELLED", "TIMED_OUT", "ACTION_REQUIRED"):
             failed += 1
 
-    resolved = passed + failed
     if failed > 0:
-        return f"fail • {passed}/{resolved}", RED
-    elif resolved == 0:
+        return f"fail • {passed}/{total}", RED
+    elif passed == total:
+        return f"pass • {total}/{total}", GREEN
+    elif passed + failed == 0:
         return "pending", YELLOW
-    elif passed == resolved:
-        return f"pass • {passed}/{resolved}", GREEN
     else:
-        return f"running • {passed}/{resolved}", YELLOW
+        return f"running • {passed}/{total}", YELLOW
 
 
 def print_table(columns, rows, highlighted=None, file=None):

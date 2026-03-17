@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "prdash"
-version = "0.1.0"
+version = "0.1.1"
 description = "Terminal dashboard for GitHub pull requests"
 readme = "README.md"
 license = "MIT"
