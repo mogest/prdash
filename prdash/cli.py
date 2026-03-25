@@ -14,6 +14,12 @@ CONFIG_PATH = os.path.join(
     "prdash.toml",
 )
 
+STATE_DIR = os.path.join(
+    os.environ.get("XDG_STATE_HOME", os.path.expanduser("~/.local/state")),
+    "prdash",
+)
+STATE_PATH = os.path.join(STATE_DIR, "state.json")
+
 USER = None
 REPOS = None
 TEAMS = None
@@ -123,6 +129,20 @@ def load_config():
     return {"user": user, "repos": repos, "teams": teams}
 
 
+def load_state():
+    try:
+        with open(STATE_PATH) as f:
+            return json.load(f)
+    except (FileNotFoundError, json.JSONDecodeError):
+        return {}
+
+
+def save_state(assignments):
+    os.makedirs(STATE_DIR, exist_ok=True)
+    with open(STATE_PATH, "w") as f:
+        json.dump(assignments, f)
+
+
 def link(url, label):
     return f"\033]8;;{url}\a{label}\033]8;;\a"
 
@@ -132,7 +152,7 @@ def get_my_prs(repo):
         [
             "gh", "pr", "list", "-R", repo,
             "--author", USER,
-            "--json", "number,title,reviewRequests,baseRefName,headRefName,url,statusCheckRollup,latestReviews",
+            "--json", "number,title,reviewRequests,baseRefName,headRefName,url,statusCheckRollup,latestReviews,isDraft",
         ],
         capture_output=True, text=True,
     )
@@ -157,7 +177,7 @@ def get_prs(repo):
     result = subprocess.run(
         [
             "gh", "pr", "list", "-R", repo,
-            "--json", "number,title,author,reviewRequests,baseRefName,headRefName,url,statusCheckRollup",
+            "--json", "number,title,author,reviewRequests,baseRefName,headRefName,url,statusCheckRollup,isDraft",
         ],
         capture_output=True, text=True,
     )
@@ -217,7 +237,7 @@ def print_table(columns, rows, highlighted=None, file=None):
                 if key == "checks" and row.get("checks_color"):
                     val = row["checks_color"] + val + RESET
                 elif key == "pr" and row.get("url"):
-                    val = BLUE + val + RESET
+                    val = (MID_GREY if row.get("is_draft") else BLUE) + val + RESET
             parts.append(val)
         line = gap.join(parts)
         if row.get("url"):
@@ -243,11 +263,14 @@ def fetch_data():
             branch = pr['headRefName'] if base == "main" else f"{pr['headRefName']} -> {base}"
             not_in_review_rows.append({
                 "pr": f"{repo_name.split('/')[-1]}#{pr['number']}",
+                "repo": repo_name,
+                "number": pr["number"],
                 "title": pr["title"],
                 "branch": branch,
                 "checks": checks_text,
                 "checks_color": checks_color,
                 "url": pr["url"],
+                "is_draft": pr.get("isDraft", False),
             })
         for repo_name, pr in waiting:
             checks_text, checks_color = check_status(pr.get("statusCheckRollup", []))
@@ -258,12 +281,15 @@ def fetch_data():
             branch = pr['headRefName'] if base == "main" else f"{pr['headRefName']} -> {base}"
             my_waiting_rows.append({
                 "pr": f"{repo_name.split('/')[-1]}#{pr['number']}",
+                "repo": repo_name,
+                "number": pr["number"],
                 "title": pr["title"],
                 "branch": branch,
                 "checks": checks_text,
                 "checks_color": checks_color,
                 "reviewer": reviewers,
                 "url": pr["url"],
+                "is_draft": pr.get("isDraft", False),
             })
         for repo_name, pr in approved:
             checks_text, checks_color = check_status(pr.get("statusCheckRollup", []))
@@ -274,12 +300,15 @@ def fetch_data():
             branch = pr['headRefName'] if base == "main" else f"{pr['headRefName']} -> {base}"
             approved_rows.append({
                 "pr": f"{repo_name.split('/')[-1]}#{pr['number']}",
+                "repo": repo_name,
+                "number": pr["number"],
                 "title": pr["title"],
                 "branch": branch,
                 "checks": checks_text,
                 "checks_color": checks_color,
                 "approved_by": approved_by,
                 "url": pr["url"],
+                "is_draft": pr.get("isDraft", False),
             })
 
     review_rows = []
@@ -293,6 +322,8 @@ def fetch_data():
             branch = pr['headRefName'] if base == "main" else f"{pr['headRefName']} -> {base}"
             review_rows.append({
                 "pr": f"{repo_name.split('/')[-1]}#{pr['number']}",
+                "repo": repo_name,
+                "number": pr["number"],
                 "title": pr["title"],
                 "author": pr["author"]["login"],
                 "branch": branch,
@@ -300,7 +331,16 @@ def fetch_data():
                 "checks_color": checks_color,
                 "reviewer": reviewers,
                 "url": pr["url"],
+                "is_draft": pr.get("isDraft", False),
             })
+
+    def sort_key(row):
+        return (not row.get("is_draft", False), row["repo"], row["number"])
+
+    not_in_review_rows.sort(key=sort_key)
+    my_waiting_rows.sort(key=sort_key)
+    review_rows.sort(key=sort_key)
+    approved_rows.sort(key=sort_key)
 
     tables = {
         "not_in_review": not_in_review_rows,
@@ -371,6 +411,16 @@ def render(tables, out, highlighted=None):
         p(NONE_MSG)
 
 
+def execute_on_review(command_template, tables, pr_keys):
+    review_by_key = {row["pr"]: row for row in tables["review"]}
+    for key in pr_keys:
+        row = review_by_key.get(key)
+        if not row:
+            continue
+        cmd = command_template.replace("{repo}", row["repo"]).replace("{number}", str(row["number"]))
+        subprocess.Popen(cmd, shell=True, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+
 def main():
     global USER, REPOS, TEAMS
 
@@ -382,6 +432,10 @@ def main():
     parser = argparse.ArgumentParser(description="Show PR status dashboard")
     parser.add_argument("-w", "--watch", type=int, metavar="SECONDS",
                         help="refresh every SECONDS seconds")
+    parser.add_argument("--show-changes-on-startup", action="store_true",
+                        help="highlight PRs that changed category since last run")
+    parser.add_argument("--execute-on-waiting-for-my-review", metavar="COMMAND",
+                        help="execute COMMAND when a PR enters 'waiting for my review' ({repo} and {number} are substituted)")
     args = parser.parse_args()
 
     def table_assignments(tables):
@@ -389,7 +443,7 @@ def main():
 
     try:
         if args.watch:
-            prev_assign = None
+            prev_assign = load_state() if (args.show_changes_on_startup or args.execute_on_waiting_for_my_review) else None
             while True:
                 tables = fetch_data()
                 curr_assign = table_assignments(tables)
@@ -398,7 +452,12 @@ def main():
                     for pr, table_name in curr_assign.items():
                         if prev_assign.get(pr) != table_name:
                             highlighted.add(pr)
+                if args.execute_on_waiting_for_my_review and prev_assign is not None:
+                    new_review = {pr for pr in highlighted if curr_assign.get(pr) == "review"}
+                    if new_review:
+                        execute_on_review(args.execute_on_waiting_for_my_review, tables, new_review)
                 prev_assign = curr_assign
+                save_state(curr_assign)
                 out = io.StringIO()
                 render(tables, out, highlighted=highlighted)
                 cols = os.get_terminal_size().columns
@@ -410,6 +469,21 @@ def main():
                 time.sleep(args.watch)
         else:
             tables = fetch_data()
-            render(tables, sys.stdout)
+            curr_assign = table_assignments(tables)
+            highlighted = None
+            if args.show_changes_on_startup or args.execute_on_waiting_for_my_review:
+                prev_assign = load_state()
+                highlighted = {
+                    pr for pr, table_name in curr_assign.items()
+                    if prev_assign.get(pr) != table_name
+                }
+                if args.execute_on_waiting_for_my_review:
+                    new_review = {pr for pr in highlighted if curr_assign.get(pr) == "review"}
+                    if new_review:
+                        execute_on_review(args.execute_on_waiting_for_my_review, tables, new_review)
+                if not args.show_changes_on_startup:
+                    highlighted = None
+            save_state(curr_assign)
+            render(tables, sys.stdout, highlighted=highlighted)
     except KeyboardInterrupt:
         print()
