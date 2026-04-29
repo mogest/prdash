@@ -139,12 +139,18 @@ def load_state():
 
 def save_state(assignments):
     os.makedirs(STATE_DIR, exist_ok=True)
-    with open(STATE_PATH, "w") as f:
+    tmp_path = STATE_PATH + ".tmp"
+    with open(tmp_path, "w") as f:
         json.dump(assignments, f)
+    os.replace(tmp_path, STATE_PATH)
 
 
 def link(url, label):
     return f"\033]8;;{url}\a{label}\033]8;;\a"
+
+
+class FetchError(Exception):
+    pass
 
 
 def get_my_prs(repo):
@@ -158,7 +164,7 @@ def get_my_prs(repo):
     )
     if result.returncode != 0:
         print(f"warning: failed to query {repo}: {result.stderr.strip()}", file=sys.stderr)
-        return [], [], []
+        raise FetchError(repo)
 
     not_in_review = []
     waiting = []
@@ -183,7 +189,7 @@ def get_prs(repo):
     )
     if result.returncode != 0:
         print(f"warning: failed to query {repo}: {result.stderr.strip()}", file=sys.stderr)
-        return []
+        raise FetchError(repo)
 
     rows = []
     for pr in json.loads(result.stdout):
@@ -252,11 +258,16 @@ def fetch_data():
         review_futures = {repo: pool.submit(get_prs, repo) for repo in REPOS}
         my_futures = {repo: pool.submit(get_my_prs, repo) for repo in REPOS}
 
+    failed_repos = set()
     not_in_review_rows = []
     my_waiting_rows = []
     approved_rows = []
     for repo in REPOS:
-        not_in_review, waiting, approved = my_futures[repo].result()
+        try:
+            not_in_review, waiting, approved = my_futures[repo].result()
+        except FetchError:
+            failed_repos.add(repo)
+            continue
         for repo_name, pr in not_in_review:
             checks_text, checks_color = check_status(pr.get("statusCheckRollup", []))
             base = pr['baseRefName']
@@ -313,7 +324,12 @@ def fetch_data():
 
     review_rows = []
     for repo in REPOS:
-        for repo_name, pr in review_futures[repo].result():
+        try:
+            review_data = review_futures[repo].result()
+        except FetchError:
+            failed_repos.add(repo)
+            continue
+        for repo_name, pr in review_data:
             checks_text, checks_color = check_status(pr.get("statusCheckRollup", []))
             reviewers = ", ".join(
                 r.get("login") or r.get("name", "") for r in pr.get("reviewRequests", [])
@@ -348,7 +364,16 @@ def fetch_data():
         "review": review_rows,
         "approved": approved_rows,
     }
-    return tables
+    return tables, failed_repos
+
+
+def restore_failed_repos(curr_assign, prev_assign, failed_repos):
+    if not failed_repos or not prev_assign:
+        return
+    prefixes = tuple(f"{repo.split('/')[-1]}#" for repo in failed_repos)
+    for pr_key, table in prev_assign.items():
+        if pr_key.startswith(prefixes) and pr_key not in curr_assign:
+            curr_assign[pr_key] = table
 
 
 def render(tables, out, highlighted=None):
@@ -443,16 +468,18 @@ def main():
 
     try:
         if args.watch:
-            prev_assign = load_state() if (args.show_changes_on_startup or args.execute_on_waiting_for_my_review) else None
+            prev_assign = load_state()
+            track = args.show_changes_on_startup or args.execute_on_waiting_for_my_review
             while True:
-                tables = fetch_data()
+                tables, failed_repos = fetch_data()
                 curr_assign = table_assignments(tables)
+                restore_failed_repos(curr_assign, prev_assign, failed_repos)
                 highlighted = set()
-                if prev_assign is not None:
+                if track:
                     for pr, table_name in curr_assign.items():
                         if prev_assign.get(pr) != table_name:
                             highlighted.add(pr)
-                if args.execute_on_waiting_for_my_review and prev_assign is not None:
+                if args.execute_on_waiting_for_my_review:
                     new_review = {pr for pr in highlighted if curr_assign.get(pr) == "review"}
                     if new_review:
                         execute_on_review(args.execute_on_waiting_for_my_review, tables, new_review)
@@ -468,11 +495,12 @@ def main():
                 print(f"\033[s\033[1;{cols - len(timestamp) + 1}H{DARK_GREY}{timestamp}{RESET}\033[u", end="", flush=True)
                 time.sleep(args.watch)
         else:
-            tables = fetch_data()
+            tables, failed_repos = fetch_data()
             curr_assign = table_assignments(tables)
+            prev_assign = load_state()
+            restore_failed_repos(curr_assign, prev_assign, failed_repos)
             highlighted = None
             if args.show_changes_on_startup or args.execute_on_waiting_for_my_review:
-                prev_assign = load_state()
                 highlighted = {
                     pr for pr, table_name in curr_assign.items()
                     if prev_assign.get(pr) != table_name
