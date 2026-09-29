@@ -38,6 +38,9 @@ RESET = "\033[0m"
 HIGHLIGHT = "\033[48;5;23;37m"
 NONE_MSG = f"{MID_GREY}— none —{RESET}"
 
+PR_LIST_LIMIT = 100
+BASE_BRANCH_MAX = 20
+
 
 def load_config():
     if os.path.exists(CONFIG_PATH):
@@ -158,6 +161,7 @@ def get_my_prs(repo):
         [
             "gh", "pr", "list", "-R", repo,
             "--author", USER,
+            "-L", str(PR_LIST_LIMIT),
             "--json", "number,title,reviewRequests,baseRefName,headRefName,url,statusCheckRollup,latestReviews,isDraft",
         ],
         capture_output=True, text=True,
@@ -183,7 +187,8 @@ def get_prs(repo):
     result = subprocess.run(
         [
             "gh", "pr", "list", "-R", repo,
-            "--json", "number,title,author,reviewRequests,baseRefName,headRefName,url,statusCheckRollup,isDraft",
+            "-L", str(PR_LIST_LIMIT),
+            "--json", "number,title,author,assignees,reviewRequests,baseRefName,headRefName,url,statusCheckRollup,isDraft",
         ],
         capture_output=True, text=True,
     )
@@ -192,12 +197,14 @@ def get_prs(repo):
         raise FetchError(repo)
 
     rows = []
+    numbers_by_branch = {}
     for pr in json.loads(result.stdout):
+        numbers_by_branch[pr["headRefName"]] = pr["number"]
         if pr.get("author", {}).get("login") == USER:
             continue
         if any(r.get("login") == USER or r.get("name") in TEAMS for r in pr.get("reviewRequests", [])):
             rows.append((repo, pr))
-    return rows
+    return rows, numbers_by_branch
 
 
 def check_status(rollup):
@@ -221,6 +228,18 @@ def check_status(rollup):
         return "pending", YELLOW
     else:
         return f"running • {passed}/{total}", YELLOW
+
+
+def branch_label(pr, numbers_by_branch):
+    head, base = pr["headRefName"], pr["baseRefName"]
+    if base == "main":
+        return head
+    number = numbers_by_branch.get(base)
+    if number:
+        return f"{head} -> #{number}"
+    if len(base) > BASE_BRANCH_MAX:
+        base = base[:BASE_BRANCH_MAX - 1] + "…"
+    return f"{head} -> {base}"
 
 
 def print_table(columns, rows, highlighted=None, file=None):
@@ -259,6 +278,15 @@ def fetch_data():
         my_futures = {repo: pool.submit(get_my_prs, repo) for repo in REPOS}
 
     failed_repos = set()
+    review_data_by_repo = {}
+    branch_numbers_by_repo = {}
+    for repo in REPOS:
+        try:
+            review_data_by_repo[repo], branch_numbers_by_repo[repo] = review_futures[repo].result()
+        except FetchError:
+            failed_repos.add(repo)
+            branch_numbers_by_repo[repo] = {}
+
     not_in_review_rows = []
     my_waiting_rows = []
     approved_rows = []
@@ -268,10 +296,10 @@ def fetch_data():
         except FetchError:
             failed_repos.add(repo)
             continue
+        numbers_by_branch = branch_numbers_by_repo[repo]
         for repo_name, pr in not_in_review:
             checks_text, checks_color = check_status(pr.get("statusCheckRollup", []))
-            base = pr['baseRefName']
-            branch = pr['headRefName'] if base == "main" else f"{pr['headRefName']} -> {base}"
+            branch = branch_label(pr, numbers_by_branch)
             not_in_review_rows.append({
                 "pr": f"{repo_name.split('/')[-1]}#{pr['number']}",
                 "repo": repo_name,
@@ -288,8 +316,7 @@ def fetch_data():
             reviewers = ", ".join(
                 r.get("login") or r.get("name", "") for r in pr.get("reviewRequests", [])
             )
-            base = pr['baseRefName']
-            branch = pr['headRefName'] if base == "main" else f"{pr['headRefName']} -> {base}"
+            branch = branch_label(pr, numbers_by_branch)
             my_waiting_rows.append({
                 "pr": f"{repo_name.split('/')[-1]}#{pr['number']}",
                 "repo": repo_name,
@@ -307,8 +334,7 @@ def fetch_data():
             approved_by = ", ".join(
                 r["author"]["login"] for r in pr.get("latestReviews", []) if r.get("state") == "APPROVED"
             )
-            base = pr['baseRefName']
-            branch = pr['headRefName'] if base == "main" else f"{pr['headRefName']} -> {base}"
+            branch = branch_label(pr, numbers_by_branch)
             approved_rows.append({
                 "pr": f"{repo_name.split('/')[-1]}#{pr['number']}",
                 "repo": repo_name,
@@ -324,18 +350,16 @@ def fetch_data():
 
     review_rows = []
     for repo in REPOS:
-        try:
-            review_data = review_futures[repo].result()
-        except FetchError:
-            failed_repos.add(repo)
+        if repo not in review_data_by_repo:
             continue
-        for repo_name, pr in review_data:
+        numbers_by_branch = branch_numbers_by_repo[repo]
+        for repo_name, pr in review_data_by_repo[repo]:
             checks_text, checks_color = check_status(pr.get("statusCheckRollup", []))
             reviewers = ", ".join(
                 r.get("login") or r.get("name", "") for r in pr.get("reviewRequests", [])
             )
-            base = pr['baseRefName']
-            branch = pr['headRefName'] if base == "main" else f"{pr['headRefName']} -> {base}"
+            assignees = ", ".join(a.get("login", "") for a in pr.get("assignees", []))
+            branch = branch_label(pr, numbers_by_branch)
             review_rows.append({
                 "pr": f"{repo_name.split('/')[-1]}#{pr['number']}",
                 "repo": repo_name,
@@ -346,6 +370,7 @@ def fetch_data():
                 "checks": checks_text,
                 "checks_color": checks_color,
                 "reviewer": reviewers,
+                "assigned": assignees,
                 "url": pr["url"],
                 "is_draft": pr.get("isDraft", False),
             })
@@ -418,6 +443,7 @@ def render(tables, out, highlighted=None):
             ("BRANCH", "branch"),
             ("CHECKS", "checks"),
             ("REVIEWER", "reviewer"),
+            ("ASSIGNED", "assigned"),
         ], review_rows, highlighted=highlighted, file=out)
     else:
         p(NONE_MSG)
