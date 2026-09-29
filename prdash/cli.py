@@ -3,6 +3,7 @@ from datetime import datetime
 import io
 import json
 import os
+import shutil
 import subprocess
 import sys
 import time
@@ -40,6 +41,7 @@ NONE_MSG = f"{MID_GREY}— none —{RESET}"
 
 PR_LIST_LIMIT = 100
 BASE_BRANCH_MAX = 20
+BRANCH_MIN = 12
 
 
 def load_config():
@@ -250,6 +252,17 @@ def print_table(columns, rows, highlighted=None, file=None):
             widths[key] = max(widths[key], len(row[key]))
 
     gap = "  "
+    def overflow():
+        width = sum(widths[k] for _, k in columns) + len(gap) * (len(columns) - 1)
+        return width - shutil.get_terminal_size().columns
+
+    if overflow() > 0 and "branch" in widths:
+        widths["branch"] -= overflow()
+        if widths["branch"] < BRANCH_MIN:
+            columns = [c for c in columns if c[1] != "branch"]
+    if overflow() > 0:
+        widths["title"] = max(widths["title"] - overflow(), 1)
+
     header = gap.join(h.ljust(widths[k]) for h, k in columns)
     print(f"{MID_GREY}{header}{RESET}", file=file)
 
@@ -257,7 +270,10 @@ def print_table(columns, rows, highlighted=None, file=None):
         highlight = row["pr"] in highlighted
         parts = []
         for _, key in columns:
-            val = row[key].ljust(widths[key])
+            val = row[key]
+            if len(val) > widths[key]:
+                val = "…" + val[1 - widths[key]:] if key == "branch" else val[:widths[key] - 1] + "…"
+            val = val.ljust(widths[key])
             if not highlight:
                 if key == "checks" and row.get("checks_color"):
                     val = row["checks_color"] + val + RESET
